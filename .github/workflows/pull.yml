@@ -59,7 +59,7 @@ jobs:
 
     - name: Upload image artifact
       if: github.event.inputs.save_as_tar == 'true'
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: docker-image-${{ github.event.inputs.image_name }}
         path: "*.tar"
