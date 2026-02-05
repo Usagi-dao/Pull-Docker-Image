@@ -1,76 +1,62 @@
-name: Pull Docker Image with Manual Input
-
+name: Save any image to tar with 75 GB SSD
 on:
   workflow_dispatch:
     inputs:
-      image_name:
-        description: 'Docker镜像名称 (例如: nginx:latest 或 ubuntu:20.04)'
+      image:
+        description: 'Docker image to pull, e.g. prom/prometheus:nightly'
         required: true
-        default: 'nginx:latest'
-        type: string
-      save_as_tar:
-        description: '是否将镜像保存为tar文件?'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-        - 'true'
-        - 'false'
-
+        default: 'prom/prometheus'
 jobs:
-  pull-docker-image:
+  save:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Validate image name
-      id: validate
-      run: |
-        if [[ "${{ github.event.inputs.image_name }}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*(/[a-zA-Z0-9_.-]+)*(:[a-zA-Z0-9_.-]+)?$ ]]; then
-          echo "✅ 镜像名称格式正确: ${{ github.event.inputs.image_name }}"
-          echo "valid=true" >> $GITHUB_OUTPUT
-        else
-          echo "❌ 镜像名称格式不正确: ${{ github.event.inputs.image_name }}"
-          echo "valid=false" >> $GITHUB_OUTPUT
-          exit 1
-        fi
-
-    - name: Pull Docker image
-      run: |
-        echo "开始拉取镜像: ${{ github.event.inputs.image_name }}"
-        docker pull ${{ github.event.inputs.image_name }}
-        echo "✅ 镜像拉取成功!"
-
-    - name: Inspect pulled image
-      run: |
-        echo "镜像详细信息:"
-        docker image inspect ${{ github.event.inputs.image_name }} --format "🖼️  镜像: {{.RepoTags}}\n📏 大小: {{.Size}} 字节\n📅 创建时间: {{.Created}}"
-
-    - name: Save image as tar file
-      if: github.event.inputs.save_as_tar == 'true'
-      run: |
-        # 清理镜像名称以创建安全的文件名
-        CLEAN_NAME=$(echo "${{ github.event.inputs.image_name }}" | sed 's/[^a-zA-Z0-9._-]/_/g')
-        docker save -o $CLEAN_NAME.tar ${{ github.event.inputs.image_name }}
-        echo "📦 镜像已保存为: $CLEAN_NAME.tar"
-        echo "📁 文件大小: $(du -h $CLEAN_NAME.tar | cut -f1)"
-
-    - name: Upload image artifact
-      if: github.event.inputs.save_as_tar == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: docker-image-${{ github.event.inputs.image_name }}
-        path: "*.tar"
-        retention-days: 7
-
-    - name: Show success message
-      run: |
-        echo "🎉 Docker镜像拉取完成!"
-        echo "📥 拉取的镜像: ${{ github.event.inputs.image_name }}"
-        if [[ "${{ github.event.inputs.save_as_tar }}" == 'true' ]]; then
-          echo "📦 镜像已保存为tar文件，可在Artifacts中下载"
-        else
-          echo "💡 镜像仅在本次工作流运行期间可用"
-        fi
+      # ---------- 0. 统一解析短名、tag、tarball ----------
+      - name: Parse image name & tag
+        id: parse
+        run: |
+          IMG="${{ github.event.inputs.image }}"
+          # 去掉仓库域名前缀
+          SHORT=$(echo "$IMG" | sed -E 's@^.*/@@; s/[:@].*$//')
+          # 判断是否带 tag
+          if [[ "$IMG" == *":"* ]]; then
+            TAG=$(echo "$IMG" | rev | cut -d: -f1 | rev)
+          else
+            TAG="latest"
+          fi
+          TARBALL="${SHORT}-${TAG}.tar"
+          echo "short=$SHORT" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "tarball=$TARBALL" >> $GITHUB_OUTPUT
+          echo "artifact=${SHORT}-${TAG}-tar" >> $GITHUB_OUTPUT
+      # ---------- 1. 清理系统盘 ----------
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo docker system prune -af --volumes
+          df -h
+      # ---------- 2. 把 Docker 目录搬到 /mnt ----------
+      - name: Move Docker to /mnt
+        run: |
+          sudo systemctl stop docker
+          sudo mv /var/lib/docker /mnt/docker
+          sudo ln -s /mnt/docker /var/lib/docker
+          sudo systemctl start docker
+      # ---------- 3. 工作目录也放 /mnt ----------
+      - name: Set WORKDIR to /mnt
+        run: |
+          sudo mkdir -p /mnt/work
+          sudo chmod 777 /mnt/work
+          echo "GITHUB_WORKSPACE=/mnt/work" >> $GITHUB_ENV
+      # ---------- 4. 拉镜像 ----------
+      - name: Pull image
+        run: docker pull "${{ github.event.inputs.image }}"
+      # ---------- 5. save ----------
+      - name: Docker save
+        run: |
+          docker save -o /mnt/work/${{ steps.parse.outputs.tarball }} ${{ github.event.inputs.image }}
+      # ---------- 6. 上传 ----------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.parse.outputs.artifact }}
+          path: /mnt/work/${{ steps.parse.outputs.tarball }}
